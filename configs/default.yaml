@@ -14,3 +14,5 @@ enable_caching: true
 retrieval_cache_size: 512
 rerank_cache_size: 1024
 enable_metrics_logging: true
+orchestrator_concurrency: 8
+rerank_batch_size: 8

@@ -1,4 +1,4 @@
-import json, asyncio, logging, os, time, hashlib
+import json, asyncio, logging, os, time, hashlib, threading
 from collections import OrderedDict
 
 from retriever.router import detect_answer_type
@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 retrieval_cache: OrderedDict[str, list] = OrderedDict()
 rerank_cache: OrderedDict[tuple, float] = OrderedDict()
+_retrieval_lock = threading.Lock()
+_rerank_lock = threading.Lock()
 
 
 def _norm_query(q: str) -> str:
@@ -26,7 +28,7 @@ def _norm_query(q: str) -> str:
     return " ".join(q.lower().strip().split())
 
 
-async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
+def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
     start_ts = time.perf_counter()
     pages_store = load_pages(pages_path)
     qtext = q["question_text"]
@@ -35,24 +37,25 @@ async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, st
 
     # --- Retrieval ---------------------------------------------------------
     if cfg.get("enable_caching", True):
-        if norm_q in retrieval_cache:
-            stats["retrieval_hits"] += 1
-            cands = retrieval_cache[norm_q]
-            retrieval_cache.move_to_end(norm_q)
-        else:
-            stats["retrieval_misses"] += 1
-            cands = hybrid_search(
-                qtext,
-                faiss_index,
-                faiss_meta,
-                bm25_index,
-                cfg["top_k_dense"],
-                cfg["top_k_bm25"],
-            )
-            retrieval_cache[norm_q] = cands
-            max_size = cfg.get("retrieval_cache_size", 512)
-            if len(retrieval_cache) > max_size:
-                retrieval_cache.popitem(last=False)
+        with _retrieval_lock:
+            if norm_q in retrieval_cache:
+                stats["retrieval_hits"] += 1
+                cands = retrieval_cache[norm_q]
+                retrieval_cache.move_to_end(norm_q)
+            else:
+                stats["retrieval_misses"] += 1
+                cands = hybrid_search(
+                    qtext,
+                    faiss_index,
+                    faiss_meta,
+                    bm25_index,
+                    cfg["top_k_dense"],
+                    cfg["top_k_bm25"],
+                )
+                retrieval_cache[norm_q] = cands
+                max_size = cfg.get("retrieval_cache_size", 512)
+                if len(retrieval_cache) > max_size:
+                    retrieval_cache.popitem(last=False)
     else:
         cands = hybrid_search(
             qtext,
@@ -69,30 +72,33 @@ async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, st
 
     # --- Re-rank -----------------------------------------------------------
     query_hash = hashlib.sha1(norm_q[:100].encode("utf-8")).hexdigest()
-    reranked = None
+    batch_size = cfg.get("rerank_batch_size", 4)
     if cfg.get("enable_caching", True):
         keys = [(query_hash, p["doc_id"], p["page"]) for p in ctx_pages]
-        if all(k in rerank_cache for k in keys):
-            stats["rerank_hits"] += 1
-            cached = [
-                {**p, "rr_score": rerank_cache[k]} for p, k in zip(ctx_pages, keys)
-            ]
-            cached.sort(key=lambda x: (-x["rr_score"], x["doc_id"], x["page"]))
-            reranked = cached[: cfg["answer_max_pages"]]
-        else:
-            stats["rerank_misses"] += 1
-            reranked_all = llm_like_rerank(
-                qtext, ctx_pages, top_m=len(ctx_pages)
-            )
-            for r in reranked_all:
-                key = (query_hash, r["doc_id"], r["page"])
-                rerank_cache[key] = r["rr_score"]
-                max_size = cfg.get("rerank_cache_size", 1024)
-                if len(rerank_cache) > max_size:
-                    rerank_cache.popitem(last=False)
-            reranked = reranked_all[: cfg["answer_max_pages"]]
+        with _rerank_lock:
+            if all(k in rerank_cache for k in keys):
+                stats["rerank_hits"] += 1
+                cached = [
+                    {**p, "rr_score": rerank_cache[k]} for p, k in zip(ctx_pages, keys)
+                ]
+                cached.sort(key=lambda x: (-x["rr_score"], x["doc_id"], x["page"]))
+                reranked = cached[: cfg["answer_max_pages"]]
+            else:
+                stats["rerank_misses"] += 1
+                reranked_all = llm_like_rerank(
+                    qtext, ctx_pages, top_m=len(ctx_pages), batch_size=batch_size
+                )
+                for r in reranked_all:
+                    key = (query_hash, r["doc_id"], r["page"])
+                    rerank_cache[key] = r["rr_score"]
+                    max_size = cfg.get("rerank_cache_size", 1024)
+                    if len(rerank_cache) > max_size:
+                        rerank_cache.popitem(last=False)
+                reranked = reranked_all[: cfg["answer_max_pages"]]
     else:
-        reranked = llm_like_rerank(qtext, ctx_pages, top_m=cfg["answer_max_pages"])
+        reranked = llm_like_rerank(
+            qtext, ctx_pages, top_m=cfg["answer_max_pages"], batch_size=batch_size
+        )
 
     ans = generate_answer(q, reranked, atype)
     try:
@@ -108,7 +114,10 @@ async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, st
     ok = check_sources(ans, pages_store)
     if not ok and len(ctx_pages) > cfg["answer_max_pages"]:
         reranked = llm_like_rerank(
-            qtext, ctx_pages, top_m=min(len(ctx_pages), cfg["answer_max_pages"] + 1)
+            qtext,
+            ctx_pages,
+            top_m=min(len(ctx_pages), cfg["answer_max_pages"] + 1),
+            batch_size=batch_size,
         )
         ans = generate_answer(q, reranked, atype)
         try:
@@ -144,15 +153,46 @@ async def run_batch(
         "latencies": [],
     }
 
-    tasks = []
     with open(questions_path, "r", encoding="utf-8") as f:
         questions = [json.loads(x) for x in f]
-    for q in questions:
-        tasks.append(
-            answer_one(
-                q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats
-            )
-        )
+
+    sem = asyncio.Semaphore(cfg.get("orchestrator_concurrency", 8))
+    timeout = cfg.get("timeout_per_q_seconds", 90)
+
+    async def handle(q):
+        async with sem:
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(
+                        answer_one,
+                        q,
+                        pages_path,
+                        faiss_index,
+                        faiss_meta,
+                        bm25_index,
+                        cfg,
+                        stats,
+                    ),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                cands = hybrid_search(
+                    q["question_text"],
+                    faiss_index,
+                    faiss_meta,
+                    bm25_index,
+                    cfg["top_k_dense"],
+                    cfg["top_k_bm25"],
+                )
+                src = (
+                    {"document": cands[0]["doc_id"], "page": cands[0]["page"]}
+                    if cands
+                    else {"document": "N/A", "page": 0}
+                )
+                stats["latencies"].append(timeout * 1000.0)
+                return {"question_id": q["question_id"], "answer": "N/A", "sources": [src]}
+
+    tasks = [asyncio.create_task(handle(q)) for q in questions]
 
     batch_start = time.perf_counter()
     results = await asyncio.gather(*tasks)
@@ -180,7 +220,7 @@ async def run_batch(
             "cache_retrieval_misses": stats["retrieval_misses"],
             "cache_rerank_hits": stats["rerank_hits"],
             "cache_rerank_misses": stats["rerank_misses"],
-            "concurrency": len(tasks),
+            "concurrency": cfg.get("orchestrator_concurrency", 8),
             "timestamp": time.time(),
         }
 
