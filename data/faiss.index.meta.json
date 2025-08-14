@@ -1,10 +1,41 @@
-[
-  {
-    "doc_id": "doc1",
-    "page": 1
-  },
-  {
-    "doc_id": "doc2",
-    "page": 1
+{
+  "meta": [
+    {
+      "doc_id": "doc1",
+      "page": 1
+    },
+    {
+      "doc_id": "doc2",
+      "page": 1
+    }
+  ],
+  "embedding": {
+    "type": "lsa",
+    "dim": 2,
+    "vocab": {
+      "page": 0,
+      "1": 1,
+      "doc1": 2,
+      "234": 3,
+      "5": 4,
+      "usd": 5,
+      "2024": 6,
+      "doc2": 7,
+      "a": 8,
+      "42": 9
+    },
+    "idf": [
+      1.0,
+      1.0,
+      1.4054651260375977,
+      1.4054651260375977,
+      1.4054651260375977,
+      1.4054651260375977,
+      1.4054651260375977,
+      1.4054651260375977,
+      1.4054651260375977,
+      1.4054651260375977
+    ],
+    "vtd": "gASV2wAAAAAAAACMFm51bXB5Ll9jb3JlLm11bHRpYXJyYXmUjAxfcmVjb25zdHJ1Y3SUk5SMBW51bXB5lIwHbmRhcnJheZSTlEsAhZRDAWKUh5RSlChLAUsKSwKGlGgDjAVkdHlwZZSTlIwCZjSUiYiHlFKUKEsDjAE8lE5OTkr/////Sv////9LAHSUYohDUHMawz5jBN4+QE6XPUBOlz1ATpc9QE6XPUBOlz1vYuw+b2LsPm9i7D5HCcM9aDu4Pg9nvj4PZ74+D2e+Pg9nvj4PZ74+Mb9zvjG/c74xv3O+lHSUYi4="
   }
-]
+}

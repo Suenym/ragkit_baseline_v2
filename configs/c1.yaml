@@ -1,0 +1,22 @@
+chunk_size_tokens: 300
+chunk_overlap_tokens: 50
+top_k_dense: 12
+top_k_bm25: 6
+rerank_in: 24
+rerank_out: 2
+answer_max_pages: 2
+timeout_per_q_seconds: 90
+orchestrator_concurrency: 8
+rerank_batch_size: 4
+cot_enabled_types: ["number", "compare", "aggregate"]
+number_tolerance_pct: 0.5
+language_mode: "auto"
+hybrid_alpha: 0.7
+enable_caching: true
+retrieval_cache_size: 512
+rerank_cache_size: 1024
+enable_metrics_logging: true
+# --- overrides ---
+orchestrator_concurrency: 1
+enable_caching: true
+enable_metrics_logging: true

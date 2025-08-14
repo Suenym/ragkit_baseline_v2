@@ -1,0 +1,22 @@
+[
+  {
+    "question_id": 1,
+    "answer": 1.0,
+    "sources": [
+      {
+        "document": "doc1",
+        "page": 1
+      }
+    ]
+  },
+  {
+    "question_id": 2,
+    "answer": "N/A",
+    "sources": [
+      {
+        "document": "doc1",
+        "page": 1
+      }
+    ]
+  }
+]
