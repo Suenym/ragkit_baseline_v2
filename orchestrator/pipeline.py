@@ -1,4 +1,4 @@
-import json, asyncio
+import json, asyncio, logging
 from retriever.router import detect_answer_type
 from retriever.hybrid import hybrid_search
 from retriever.parent_page import load_pages, expand_to_pages
@@ -6,6 +6,11 @@ from retriever.rerank import llm_like_rerank
 from answer.generator import generate_answer
 from answer.validate import as_json_obj
 from answer.source_check import check_sources
+
+logger = logging.getLogger(__name__)
+cache_retrieval_hits = 0
+cache_rerank_hits = 0
+avg_latency_ms = 0.0
 
 async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg):
     pages_store = load_pages(pages_path)
@@ -38,4 +43,5 @@ async def run_batch(questions_path, pages_path, faiss_index, faiss_meta, bm25_in
     results = await asyncio.gather(*tasks)
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
+    logger.info("cache_retrieval_hits=%d cache_rerank_hits=%d avg_latency_ms=%.2f", cache_retrieval_hits, cache_rerank_hits, avg_latency_ms)
     return out_path
