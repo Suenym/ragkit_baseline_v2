@@ -1,0 +1,11 @@
+chunk_size_tokens: 300
+chunk_overlap_tokens: 50
+top_k_dense: 12
+top_k_bm25: 6
+rerank_in: 24
+rerank_out: 2
+answer_max_pages: 2
+timeout_per_q_seconds: 90
+cot_enabled_types: ["number", "compare", "aggregate"]
+number_tolerance_pct: 0.5
+language_mode: "auto"
