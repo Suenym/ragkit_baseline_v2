@@ -1,4 +1,4 @@
-import json, asyncio, logging, os, time, hashlib
+import json, asyncio, logging, os, time, hashlib, concurrent.futures
 from collections import OrderedDict
 
 from retriever.router import detect_answer_type
@@ -26,7 +26,7 @@ def _norm_query(q: str) -> str:
     return " ".join(q.lower().strip().split())
 
 
-async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
+def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
     start_ts = time.perf_counter()
     pages_store = load_pages(pages_path)
     qtext = q["question_text"]
@@ -82,7 +82,10 @@ async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, st
         else:
             stats["rerank_misses"] += 1
             reranked_all = llm_like_rerank(
-                qtext, ctx_pages, top_m=len(ctx_pages)
+                qtext,
+                ctx_pages,
+                top_m=len(ctx_pages),
+                batch_size=cfg.get("rerank_batch_size", 4),
             )
             for r in reranked_all:
                 key = (query_hash, r["doc_id"], r["page"])
@@ -92,7 +95,12 @@ async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, st
                     rerank_cache.popitem(last=False)
             reranked = reranked_all[: cfg["answer_max_pages"]]
     else:
-        reranked = llm_like_rerank(qtext, ctx_pages, top_m=cfg["answer_max_pages"])
+        reranked = llm_like_rerank(
+            qtext,
+            ctx_pages,
+            top_m=cfg["answer_max_pages"],
+            batch_size=cfg.get("rerank_batch_size", 4),
+        )
 
     ans = generate_answer(q, reranked, atype)
     try:
@@ -108,7 +116,10 @@ async def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, st
     ok = check_sources(ans, pages_store)
     if not ok and len(ctx_pages) > cfg["answer_max_pages"]:
         reranked = llm_like_rerank(
-            qtext, ctx_pages, top_m=min(len(ctx_pages), cfg["answer_max_pages"] + 1)
+            qtext,
+            ctx_pages,
+            top_m=min(len(ctx_pages), cfg["answer_max_pages"] + 1),
+            batch_size=cfg.get("rerank_batch_size", 4),
         )
         ans = generate_answer(q, reranked, atype)
         try:
@@ -144,19 +155,94 @@ async def run_batch(
         "latencies": [],
     }
 
-    tasks = []
     with open(questions_path, "r", encoding="utf-8") as f:
         questions = [json.loads(x) for x in f]
-    for q in questions:
-        tasks.append(
-            answer_one(
-                q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats
-            )
-        )
+
+    concurrency = max(1, int(cfg.get("orchestrator_concurrency", 8)))
+    sem = asyncio.Semaphore(concurrency)
+    timeout_per_q = cfg.get("timeout_per_q_seconds", 90)
+    loop = asyncio.get_running_loop()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=concurrency)
+
+    async def process(q):
+        async with sem:
+            try:
+                return await asyncio.wait_for(
+                    loop.run_in_executor(
+                        executor,
+                        answer_one,
+                        q,
+                        pages_path,
+                        faiss_index,
+                        faiss_meta,
+                        bm25_index,
+                        cfg,
+                        stats,
+                    ),
+                    timeout=timeout_per_q,
+                )
+            except asyncio.TimeoutError:
+                pages_store = load_pages(pages_path)
+                cands = hybrid_search(
+                    q["question_text"],
+                    faiss_index,
+                    faiss_meta,
+                    bm25_index,
+                    cfg["top_k_dense"],
+                    cfg["top_k_bm25"],
+                )
+                ctx_pages = expand_to_pages(
+                    cands, pages_store, max_pages=cfg["answer_max_pages"] * 2
+                )
+                if ctx_pages:
+                    src = {
+                        "document": ctx_pages[0]["doc_id"],
+                        "page": ctx_pages[0]["page"],
+                    }
+                    sources = [src]
+                else:
+                    sources = []
+                stats["latencies"].append(timeout_per_q * 1000.0)
+                return {
+                    "question_id": q["question_id"],
+                    "answer": "N/A",
+                    "sources": sources,
+                }
+            except Exception:
+                pages_store = load_pages(pages_path)
+                cands = hybrid_search(
+                    q["question_text"],
+                    faiss_index,
+                    faiss_meta,
+                    bm25_index,
+                    cfg["top_k_dense"],
+                    cfg["top_k_bm25"],
+                )
+                ctx_pages = expand_to_pages(
+                    cands, pages_store, max_pages=cfg["answer_max_pages"] * 2
+                )
+                if ctx_pages:
+                    src = {
+                        "document": ctx_pages[0]["doc_id"],
+                        "page": ctx_pages[0]["page"],
+                    }
+                    sources = [src]
+                else:
+                    sources = []
+                stats["latencies"].append(0.0)
+                return {
+                    "question_id": q["question_id"],
+                    "answer": "N/A",
+                    "sources": sources,
+                }
+
+    tasks = [asyncio.create_task(process(q)) for q in questions]
 
     batch_start = time.perf_counter()
     results = await asyncio.gather(*tasks)
     total_wall_ms = (time.perf_counter() - batch_start) * 1000.0
+
+    executor.shutdown(wait=True)
 
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
@@ -180,7 +266,7 @@ async def run_batch(
             "cache_retrieval_misses": stats["retrieval_misses"],
             "cache_rerank_hits": stats["rerank_hits"],
             "cache_rerank_misses": stats["rerank_misses"],
-            "concurrency": len(tasks),
+            "concurrency": concurrency,
             "timestamp": time.time(),
         }
 
