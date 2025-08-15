@@ -1,8 +1,13 @@
 """Utilities for combining dense and BM25 retrieval results."""
 
-from index.build_dense import search_faiss
+from index.build_dense import search_faiss, _load_meta
 from index.build_bm25 import search_bm25
-import json, os
+import json, os, threading
+
+_META_LOGGED = False
+_LOG_LOCK = threading.Lock()
+os.makedirs("/tmp", exist_ok=True)
+open("/tmp/hybrid.log", "w", encoding="utf-8").close()
 
 
 def _normalize(records, score_key):
@@ -52,6 +57,7 @@ def hybrid_search(
     the number of final candidates to return (defaults to 24 as per config).
     """
 
+    global _META_LOGGED
     dense = search_faiss(dense_index, dense_meta, query, top_k_dense)
     sparse = search_bm25(bm25_index, query, top_k_bm25)
 
@@ -123,7 +129,21 @@ def hybrid_search(
 
     try:
         os.makedirs("/tmp", exist_ok=True)
-        with open("/tmp/hybrid.log", "a", encoding="utf-8") as f:
+        with _LOG_LOCK, open("/tmp/hybrid.log", "a", encoding="utf-8") as f:
+            if not _META_LOGGED:
+                _, emb = _load_meta(dense_meta)
+                f.write(
+                    json.dumps(
+                        {
+                            "method": emb.get("method"),
+                            "model": emb.get("model"),
+                            "normalize": emb.get("normalize"),
+                        },
+                        ensure_ascii=False,
+                    )
+                    + "\n"
+                )
+                _META_LOGGED = True
             top = results[0] if results else {}
             f.write(
                 "OK hybrid: "

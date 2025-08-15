@@ -90,6 +90,9 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                 ctx_pages,
                 top_m=len(ctx_pages),
                 batch_size=cfg.get("rerank_batch_size", 4),
+                mode=cfg.get("rerank_mode", "auto"),
+                ce_model_name=cfg.get("ce_model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+                ce_max_batch=cfg.get("ce_max_batch", 32),
             )
             for r in reranked_all:
                 key = (query_hash, r["doc_id"], r["page"])
@@ -104,6 +107,9 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
             ctx_pages,
             top_m=cfg.get("rerank_out", cfg["answer_max_pages"]),
             batch_size=cfg.get("rerank_batch_size", 4),
+            mode=cfg.get("rerank_mode", "auto"),
+            ce_model_name=cfg.get("ce_model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+            ce_max_batch=cfg.get("ce_max_batch", 32),
         )
 
     ans = generate_answer(q, reranked, atype)
@@ -124,6 +130,9 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
             ctx_pages,
             top_m=min(len(ctx_pages), cfg.get("rerank_out", cfg["answer_max_pages"]) + 1),
             batch_size=cfg.get("rerank_batch_size", 4),
+            mode=cfg.get("rerank_mode", "auto"),
+            ce_model_name=cfg.get("ce_model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
+            ce_max_batch=cfg.get("ce_max_batch", 32),
         )
         ans = generate_answer(q, reranked, atype)
         try:

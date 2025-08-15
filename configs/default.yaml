@@ -17,3 +17,12 @@ enable_caching: true
 retrieval_cache_size: 512
 rerank_cache_size: 1024
 enable_metrics_logging: true
+dense_backend: auto                # auto|sbert|lsa
+dense_model_name: paraphrase-multilingual-MiniLM-L12-v2
+dense_device: auto                 # auto|cpu|cuda
+dense_max_batch: 64
+dense_normalize: true              # L2-нормировка эмбеддингов
+
+rerank_mode: auto                  # auto|ce|heuristic
+ce_model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
+ce_max_batch: 32
