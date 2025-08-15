@@ -48,6 +48,9 @@ def _tokenise(text: str) -> List[str]:
 
 
 def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
+    from scipy.sparse import csr_matrix
+    from scipy.sparse.linalg import svds
+
     tokens = [_tokenise(t) for t in texts]
 
     vocab: Dict[str, int] = {}
@@ -67,7 +70,9 @@ def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
     for tok, idx in vocab.items():
         idf[idx] = np.log((n_docs + 1) / (df[tok] + 1)) + 1.0
 
-    X = np.zeros((n_docs, vocab_size), dtype=np.float32)
+    rows: List[int] = []
+    cols: List[int] = []
+    data: List[float] = []
     for i, toks in enumerate(tokens):
         counts: Dict[int, int] = {}
         for tok in toks:
@@ -76,13 +81,18 @@ def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
             max_tf = max(counts.values())
             for idx, c in counts.items():
                 tf = c / max_tf
-                X[i, idx] = tf * idf[idx]
+                rows.append(i)
+                cols.append(idx)
+                data.append(tf * idf[idx])
+
+    X = csr_matrix((data, (rows, cols)), shape=(n_docs, vocab_size), dtype=np.float32)
 
     dim = min(dim, min(X.shape))
-    U, S, Vt = np.linalg.svd(X, full_matrices=False)
-    U = U[:, :dim]
-    S = S[:dim]
-    Vt = Vt[:dim, :]
+    U, S, Vt = svds(X, k=dim)
+    order = np.argsort(S)[::-1]
+    U = U[:, order]
+    S = S[order]
+    Vt = Vt[order, :]
 
     for i in range(dim):  # deterministic sign
         if Vt[i, 0] < 0:
