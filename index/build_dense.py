@@ -172,7 +172,13 @@ def build_faiss_index(pages_jsonl: str, out_index_path: str, out_meta_path: str)
         for line in f:
             rec = json.loads(line)
             texts.append(rec["text"])
-            meta.append({"doc_id": rec["doc_id"], "page": rec["page"]})
+            meta.append(
+                {
+                    "doc_id": rec["doc_id"],
+                    "page": rec["page"],
+                    "chunk_id": rec.get("chunk_id", 0),
+                }
+            )
 
     encoder, embed_info = _try_sentence_transformer()
     if encoder is None:

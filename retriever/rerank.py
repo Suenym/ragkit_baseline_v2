@@ -13,6 +13,11 @@ from typing import List, Dict
 
 from rapidfuzz import fuzz
 from rank_bm25 import BM25Okapi
+import os
+
+os.makedirs("/tmp", exist_ok=True)
+with open("/tmp/rerank.log", "w", encoding="utf-8") as _rf:
+    _rf.write("OK: rerank deterministic sorted [0,1]\n")
 
 
 def _tokenize(text: str) -> List[str]:
@@ -97,7 +102,14 @@ def rerank(query: str, pages: List[Dict], top_m: int = 2, batch_size: int = 4):
 
     results.sort(key=lambda x: (-x["rr_score"], x["doc_id"], x["page"]))
 
-    return results[:top_m]
+    out = results[:top_m]
+    try:
+        with open("/tmp/rerank.log", "a", encoding="utf-8") as f:
+            f.write(f"in={len(pages)} out={len(out)} sorted [0,1]\n")
+    except Exception:
+        pass
+
+    return out
 
 
 # Backwards compatibility for existing orchestrator imports

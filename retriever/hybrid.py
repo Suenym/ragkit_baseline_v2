@@ -2,12 +2,13 @@
 
 from index.build_dense import search_faiss
 from index.build_bm25 import search_bm25
+import json, os
 
 
 def _normalize(records, score_key):
     """Min-max normalisation of scores in ``records``.
 
-    Returns a mapping keyed by ``(doc_id, page)`` with normalised scores in
+    Returns a mapping keyed by ``(doc_id, page, chunk_id)`` with normalised scores in
     ``[0, 1]``.  When all scores are equal (including the degenerate case of all
     zeros) the normalised value for every record is ``0.0`` to avoid division by
     zero and keep deterministic behaviour.
@@ -28,7 +29,7 @@ def _normalize(records, score_key):
 
     normalised = {}
     for r, n in zip(records, norm):
-        key = (r["doc_id"], r["page"])
+        key = (r["doc_id"], r["page"], r.get("chunk_id", 0))
         normalised[key] = n
     return normalised
 
@@ -63,20 +64,34 @@ def hybrid_search(
     merged = {}
 
     for r in dense:
-        key = (r["doc_id"], r["page"])
+        key = (r["doc_id"], r["page"], r.get("chunk_id", 0))
         merged.setdefault(
-            key, {"doc_id": r["doc_id"], "page": r["page"], "dense": 0.0, "bm25": 0.0}
+            key,
+            {
+                "doc_id": r["doc_id"],
+                "page": r["page"],
+                "chunk_id": r.get("chunk_id", 0),
+                "dense": 0.0,
+                "bm25": 0.0,
+            },
         )
-        merged[key]["dense"] = dense_norm[key]
+        merged[key]["dense"] = dense_norm.get(key, 0.0)
 
     for r in sparse:
-        key = (r["doc_id"], r["page"])
+        key = (r["doc_id"], r["page"], r.get("chunk_id", 0))
         merged.setdefault(
-            key, {"doc_id": r["doc_id"], "page": r["page"], "dense": 0.0, "bm25": 0.0}
+            key,
+            {
+                "doc_id": r["doc_id"],
+                "page": r["page"],
+                "chunk_id": r.get("chunk_id", 0),
+                "dense": 0.0,
+                "bm25": 0.0,
+            },
         )
-        merged[key]["bm25"] = sparse_norm[key]
+        merged[key]["bm25"] = sparse_norm.get(key, 0.0)
 
-    results = []
+    chunk_results = []
     for key, vals in merged.items():
         d = vals["dense"]
         b = vals["bm25"]
@@ -86,9 +101,47 @@ def hybrid_search(
             score = d
         else:
             score = b
-        results.append({"doc_id": vals["doc_id"], "page": vals["page"], "score": score})
+        chunk_results.append(
+            {
+                "doc_id": vals["doc_id"],
+                "page": vals["page"],
+                "chunk_id": vals.get("chunk_id", 0),
+                "score": score,
+            }
+        )
 
+    page_best = {}
+    for r in chunk_results:
+        key = (r["doc_id"], r["page"])
+        if key not in page_best or r["score"] > page_best[key]["score"]:
+            page_best[key] = r
+
+    results = list(page_best.values())
     results.sort(key=lambda x: (-x["score"], x["doc_id"], x["page"]))
     if k_out is not None:
         results = results[:k_out]
+
+    try:
+        os.makedirs("/tmp", exist_ok=True)
+        with open("/tmp/hybrid.log", "a", encoding="utf-8") as f:
+            top = results[0] if results else {}
+            f.write(
+                "OK hybrid: "
+                + json.dumps(
+                    {
+                        "N_dense": len(dense),
+                        "N_bm25": len(sparse),
+                        "merged": len(results),
+                        "top1": {
+                            "doc_id": top.get("doc_id"),
+                            "page": top.get("page"),
+                            "score": round(top.get("score", 0.0), 6),
+                        },
+                    }
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
+
     return results

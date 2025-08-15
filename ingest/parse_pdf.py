@@ -4,6 +4,7 @@ import re
 from typing import List, Tuple
 
 import fitz  # PyMuPDF
+import yaml
 from tqdm import tqdm
 
 
@@ -14,21 +15,51 @@ def clean_text(txt: str) -> str:
     return txt.strip()
 
 
+def _load_cfg() -> dict:
+    try:
+        with open("configs/default.yaml", "r", encoding="utf-8") as f:
+            return yaml.safe_load(f) or {}
+    except Exception:
+        return {}
+
+
+CFG = _load_cfg()
+CHUNK_SIZE = int(CFG.get("chunk_size_tokens", 300))
+CHUNK_OVERLAP = int(CFG.get("chunk_overlap_tokens", CFG.get("chunk_overlap", 50)))
+
+
+def _chunk_page(text: str) -> List[str]:
+    tokens = text.split()
+    if not tokens:
+        return [""]
+    step = max(1, CHUNK_SIZE - CHUNK_OVERLAP)
+    chunks: List[str] = []
+    for i in range(0, len(tokens), step):
+        part = tokens[i : i + CHUNK_SIZE]
+        chunks.append(" ".join(part))
+        if i + CHUNK_SIZE >= len(tokens):
+            break
+    return chunks
+
+
 def parse_pdf(path: str, doc_id: str) -> list[dict]:
-    """Парсит PDF в список страниц с текстом."""
+    """Парсит PDF в список страниц с разбиением на чанки."""
     pages: list[dict] = []
     with fitz.open(path) as doc:
         for i, page in enumerate(doc):
-            text = page.get_text("text") or ""
-            text = clean_text(text)
-            pages.append(
-                {
-                    "doc_id": str(doc_id),
-                    "page": i + 1,
-                    "text": f"[PAGE={i+1}]\n{text}",
-                    "lang_guess": "auto",
-                }
-            )
+            raw = page.get_text("text") or ""
+            raw = clean_text(raw)
+            chunks = _chunk_page(raw)
+            for cid, chunk in enumerate(chunks):
+                pages.append(
+                    {
+                        "doc_id": str(doc_id),
+                        "page": i + 1,
+                        "chunk_id": cid,
+                        "text": f"[PAGE={i+1}]\n{chunk}",
+                        "lang_guess": "auto",
+                    }
+                )
     return pages
 
 
