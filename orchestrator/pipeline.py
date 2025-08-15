@@ -132,6 +132,15 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                     {"document": reranked[0]["doc_id"], "page": reranked[0]["page"]}
                 ],
             }
+        # Вторичная проверка источников: если не подтвердили, отдаём N/A
+        if not check_sources(ans, pages_store):
+            ans = {
+                "question_id": q["question_id"],
+                "answer": "N/A",
+                "sources": [
+                    {"document": reranked[0]["doc_id"], "page": reranked[0]["page"]}
+                ],
+            }
 
     elapsed_ms = (time.perf_counter() - start_ts) * 1000.0
     stats["latencies"].append(elapsed_ms)
