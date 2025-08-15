@@ -22,6 +22,7 @@ from typing import Callable, Dict, Iterable, List, Tuple
 
 import faiss
 import numpy as np
+import yaml
 
 
 # ---------------------------------------------------------------------------
@@ -47,7 +48,7 @@ def _tokenise(text: str) -> List[str]:
     return re.findall(r"\b\w+\b", text.lower())
 
 
-def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
+def _fit_lsa(texts: List[str], dim: int = LSA_DIM, normalize: bool = True) -> Tuple[np.ndarray, Dict]:
     from scipy.sparse import csr_matrix
     from scipy.sparse.linalg import svds
 
@@ -100,19 +101,21 @@ def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
             Vt[i, :] *= -1
 
     X_red = U * S
-    X_red = X_red / (np.linalg.norm(X_red, axis=1, keepdims=True) + 1e-12)
+    if normalize:
+        X_red = X_red / (np.linalg.norm(X_red, axis=1, keepdims=True) + 1e-12)
 
     embed_info = {
-        "type": "lsa",
+        "method": "lsa",
         "dim": int(dim),
         "vocab": vocab,
         "idf": idf.tolist(),
         "vtd": base64.b64encode(pickle.dumps(Vt.T)).decode("utf-8"),
+        "normalize": bool(normalize),
     }
     return X_red.astype("float32"), embed_info
 
 
-def _lsa_embed(texts: Iterable[str], vocab: Dict[str, int], idf: List[float], vtd: str) -> np.ndarray:
+def _lsa_embed(texts: Iterable[str], vocab: Dict[str, int], idf: List[float], vtd: str, normalize: bool = True) -> np.ndarray:
     Vt_T = pickle.loads(base64.b64decode(vtd))
     vocab_size = len(vocab)
     idf_vec = np.array(idf, dtype=np.float32)
@@ -133,7 +136,8 @@ def _lsa_embed(texts: Iterable[str], vocab: Dict[str, int], idf: List[float], vt
                 tf = c / max_tf
                 vec[idx] = tf * idf_vec[idx]
         emb = vec @ Vt_T
-        emb = emb / (np.linalg.norm(emb) + 1e-12)
+        if normalize:
+            emb = emb / (np.linalg.norm(emb) + 1e-12)
         vecs.append(emb.astype("float32"))
 
     return np.vstack(vecs)
@@ -141,23 +145,28 @@ def _lsa_embed(texts: Iterable[str], vocab: Dict[str, int], idf: List[float], vt
 
 # ---------------------------------------------------------------------------
 # SentenceTransformer loading (if available)
-def _try_sentence_transformer() -> Tuple[Callable[[List[str]], np.ndarray], Dict] | Tuple[None, None]:
+def _try_sentence_transformer(
+    model_name: str,
+    device: str,
+    batch_size: int,
+    normalize: bool,
+) -> Tuple[Callable[[List[str]], np.ndarray], Dict] | Tuple[None, None]:
     try:  # pragma: no cover - optional dependency
         from sentence_transformers import SentenceTransformer
 
-        model = SentenceTransformer(ST_MODEL_NAME, device="cpu")
+        model = SentenceTransformer(model_name, device=device)
         model.eval()
 
         def encode(texts: List[str]) -> np.ndarray:
             return model.encode(
                 texts,
-                batch_size=BATCH_SIZE,
+                batch_size=batch_size,
                 show_progress_bar=False,
                 convert_to_numpy=True,
-                normalize_embeddings=True,
+                normalize_embeddings=normalize,
             ).astype("float32")
 
-        info = {"type": "st", "model": ST_MODEL_NAME}
+        info = {"method": "sbert", "model": model_name, "normalize": bool(normalize)}
         return encode, info
     except Exception:
         return None, None
@@ -165,7 +174,39 @@ def _try_sentence_transformer() -> Tuple[Callable[[List[str]], np.ndarray], Dict
 
 # ---------------------------------------------------------------------------
 # Index construction and search
-def build_faiss_index(pages_jsonl: str, out_index_path: str, out_meta_path: str) -> Tuple[str, str]:
+def _resolve_device(device: str) -> str:
+    if device == "auto":
+        try:  # pragma: no cover - optional dependency
+            import torch
+
+            return "cuda" if torch.cuda.is_available() else "cpu"
+        except Exception:
+            return "cpu"
+    return device
+
+
+def build_faiss_index(
+    pages_jsonl: str,
+    out_index_path: str,
+    out_meta_path: str,
+    cfg: Dict | None = None,
+) -> Tuple[str, str]:
+    if cfg is None:
+        try:
+            cfg_path = os.path.join(
+                os.path.dirname(__file__), "..", "configs", "default.yaml"
+            )
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = yaml.safe_load(f)
+        except Exception:
+            cfg = {}
+
+    backend = cfg.get("dense_backend", "auto")
+    model_name = cfg.get("dense_model_name", ST_MODEL_NAME)
+    device = _resolve_device(cfg.get("dense_device", "auto"))
+    batch = int(cfg.get("dense_max_batch", BATCH_SIZE))
+    normalize = bool(cfg.get("dense_normalize", True))
+
     texts: List[str] = []
     meta: List[Dict[str, str]] = []
     with open(pages_jsonl, "r", encoding="utf-8") as f:
@@ -180,13 +221,19 @@ def build_faiss_index(pages_jsonl: str, out_index_path: str, out_meta_path: str)
                 }
             )
 
-    encoder, embed_info = _try_sentence_transformer()
+    encoder = None
+    embed_info = None
+    if backend != "lsa":
+        encoder, embed_info = _try_sentence_transformer(
+            model_name, device, batch, normalize
+        )
+
     if encoder is None:
-        X, embed_info = _fit_lsa(texts, LSA_DIM)
+        X, embed_info = _fit_lsa(texts, LSA_DIM, normalize)
     else:
         parts = []
-        for i in range(0, len(texts), BATCH_SIZE):
-            parts.append(encoder(texts[i : i + BATCH_SIZE]))
+        for i in range(0, len(texts), batch):
+            parts.append(encoder(texts[i : i + batch]))
         X = np.vstack(parts)
 
     dim = X.shape[1]
@@ -196,6 +243,32 @@ def build_faiss_index(pages_jsonl: str, out_index_path: str, out_meta_path: str)
 
     with open(out_meta_path, "w", encoding="utf-8") as f:
         json.dump({"meta": meta, "embedding": embed_info}, f, ensure_ascii=False, indent=2)
+
+    try:
+        os.makedirs("/tmp", exist_ok=True)
+        norms = np.linalg.norm(X, axis=1)
+        meta_log = {
+            "method": embed_info.get("method"),
+            "model": embed_info.get("model"),
+            "normalize": embed_info.get("normalize"),
+        }
+        with open("/tmp/dense.log", "w", encoding="utf-8") as lf:
+            lf.write(
+                json.dumps(
+                    {
+                        "ntotal": int(index.ntotal),
+                        "dim": int(dim),
+                        "norm_mean": float(norms.mean()),
+                        "norm_min": float(norms.min()),
+                        "norm_max": float(norms.max()),
+                        "meta": meta_log,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+    except Exception:
+        pass
 
     return out_index_path, out_meta_path
 
@@ -213,7 +286,7 @@ def _load_meta(meta_path: str) -> Tuple[List[Dict], Dict]:
 
 
 def _embed_query(query: str, embed_info: Dict) -> np.ndarray:
-    if embed_info.get("type") == "st":
+    if embed_info.get("method") == "sbert":
         try:  # pragma: no cover - optional dependency
             from sentence_transformers import SentenceTransformer
 
@@ -224,13 +297,19 @@ def _embed_query(query: str, embed_info: Dict) -> np.ndarray:
                 batch_size=1,
                 show_progress_bar=False,
                 convert_to_numpy=True,
-                normalize_embeddings=True,
+                normalize_embeddings=embed_info.get("normalize", True),
             ).astype("float32")
         except Exception:
             pass
 
-    if embed_info.get("type") == "lsa":
-        return _lsa_embed([query], embed_info["vocab"], embed_info["idf"], embed_info["vtd"])
+    if embed_info.get("method") == "lsa":
+        return _lsa_embed(
+            [query],
+            embed_info["vocab"],
+            embed_info["idf"],
+            embed_info["vtd"],
+            embed_info.get("normalize", True),
+        )
 
     # Fallback to hash-based embedding for legacy indices
     h = np.frombuffer(hashlib.sha1(query.encode("utf-8")).digest(), dtype=np.uint8).astype("float32")
