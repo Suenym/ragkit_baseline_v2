@@ -22,6 +22,7 @@ from typing import Callable, Dict, Iterable, List, Tuple
 
 import faiss
 import numpy as np
+from scipy.sparse.linalg import svds
 
 
 # ---------------------------------------------------------------------------
@@ -79,10 +80,9 @@ def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
                 X[i, idx] = tf * idf[idx]
 
     dim = min(dim, min(X.shape))
-    U, S, Vt = np.linalg.svd(X, full_matrices=False)
-    U = U[:, :dim]
-    S = S[:dim]
-    Vt = Vt[:dim, :]
+    U, S, Vt = svds(X, k=dim, return_singular_vectors=True, random_state=0)
+    idx = np.argsort(S)[::-1]
+    U, S, Vt = U[:, idx], S[idx], Vt[idx, :]
 
     for i in range(dim):  # deterministic sign
         if Vt[i, 0] < 0:
@@ -91,6 +91,8 @@ def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
 
     X_red = U * S
     X_red = X_red / (np.linalg.norm(X_red, axis=1, keepdims=True) + 1e-12)
+    Vt = Vt.astype(np.float32)
+    X_red = X_red.astype(np.float32)
 
     embed_info = {
         "type": "lsa",
@@ -99,7 +101,7 @@ def _fit_lsa(texts: List[str], dim: int = LSA_DIM) -> Tuple[np.ndarray, Dict]:
         "idf": idf.tolist(),
         "vtd": base64.b64encode(pickle.dumps(Vt.T)).decode("utf-8"),
     }
-    return X_red.astype("float32"), embed_info
+    return X_red, embed_info
 
 
 def _lsa_embed(texts: Iterable[str], vocab: Dict[str, int], idf: List[float], vtd: str) -> np.ndarray:
