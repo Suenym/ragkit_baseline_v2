@@ -24,7 +24,7 @@ def parse_pdf(path, doc_id):
 def parse_corpus(input_dir: str, out_jsonl: str):
     os.makedirs(os.path.dirname(out_jsonl), exist_ok=True)
     with open(out_jsonl, "w", encoding="utf-8") as out:
-        for fname in tqdm(sorted(os.listdir(input_dir))):
+        for fname in tqdm(sorted(os.walk(input_dir))):
             if not fname.lower().endswith(".pdf"): 
                 continue
             path = os.path.join(input_dir, fname)
