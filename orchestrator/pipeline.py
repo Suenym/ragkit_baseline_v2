@@ -48,6 +48,8 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                 bm25_index,
                 cfg["top_k_dense"],
                 cfg["top_k_bm25"],
+                alpha=cfg.get("hybrid_alpha", 0.7),
+                k_out=cfg.get("rerank_in", 24),
             )
             retrieval_cache[norm_q] = cands
             max_size = cfg.get("retrieval_cache_size", 512)
@@ -61,10 +63,12 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
             bm25_index,
             cfg["top_k_dense"],
             cfg["top_k_bm25"],
+            alpha=cfg.get("hybrid_alpha", 0.7),
+            k_out=cfg.get("rerank_in", 24),
         )
 
     ctx_pages = expand_to_pages(
-        cands, pages_store, max_pages=cfg["answer_max_pages"] * 2
+        cands, pages_store, max_pages=cfg.get("rerank_in", 24)
     )
 
     # --- Re-rank -----------------------------------------------------------
@@ -78,7 +82,7 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                 {**p, "rr_score": rerank_cache[k]} for p, k in zip(ctx_pages, keys)
             ]
             cached.sort(key=lambda x: (-x["rr_score"], x["doc_id"], x["page"]))
-            reranked = cached[: cfg["answer_max_pages"]]
+            reranked = cached[: cfg.get("rerank_out", cfg["answer_max_pages"])]
         else:
             stats["rerank_misses"] += 1
             reranked_all = llm_like_rerank(
@@ -93,12 +97,12 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                 max_size = cfg.get("rerank_cache_size", 1024)
                 if len(rerank_cache) > max_size:
                     rerank_cache.popitem(last=False)
-            reranked = reranked_all[: cfg["answer_max_pages"]]
+            reranked = reranked_all[: cfg.get("rerank_out", cfg["answer_max_pages"])]
     else:
         reranked = llm_like_rerank(
             qtext,
             ctx_pages,
-            top_m=cfg["answer_max_pages"],
+            top_m=cfg.get("rerank_out", cfg["answer_max_pages"]),
             batch_size=cfg.get("rerank_batch_size", 4),
         )
 
@@ -114,11 +118,11 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
             ],
         }
     ok = check_sources(ans, pages_store)
-    if not ok and len(ctx_pages) > cfg["answer_max_pages"]:
+    if not ok and len(ctx_pages) > cfg.get("rerank_out", cfg["answer_max_pages"]):
         reranked = llm_like_rerank(
             qtext,
             ctx_pages,
-            top_m=min(len(ctx_pages), cfg["answer_max_pages"] + 1),
+            top_m=min(len(ctx_pages), cfg.get("rerank_out", cfg["answer_max_pages"]) + 1),
             batch_size=cfg.get("rerank_batch_size", 4),
         )
         ans = generate_answer(q, reranked, atype)
@@ -199,9 +203,11 @@ async def run_batch(
                     bm25_index,
                     cfg["top_k_dense"],
                     cfg["top_k_bm25"],
+                    alpha=cfg.get("hybrid_alpha", 0.7),
+                    k_out=cfg.get("rerank_in", 24),
                 )
                 ctx_pages = expand_to_pages(
-                    cands, pages_store, max_pages=cfg["answer_max_pages"] * 2
+                    cands, pages_store, max_pages=cfg.get("rerank_in", 24)
                 )
                 if ctx_pages:
                     src = {
@@ -226,9 +232,11 @@ async def run_batch(
                     bm25_index,
                     cfg["top_k_dense"],
                     cfg["top_k_bm25"],
+                    alpha=cfg.get("hybrid_alpha", 0.7),
+                    k_out=cfg.get("rerank_in", 24),
                 )
                 ctx_pages = expand_to_pages(
-                    cands, pages_store, max_pages=cfg["answer_max_pages"] * 2
+                    cands, pages_store, max_pages=cfg.get("rerank_in", 24)
                 )
                 if ctx_pages:
                     src = {
@@ -282,6 +290,16 @@ async def run_batch(
         os.makedirs("logs", exist_ok=True)
         with open("logs/metrics.jsonl", "a", encoding="utf-8") as mf:
             mf.write(json.dumps(metrics, ensure_ascii=False) + "\n")
+
+    cache_metrics = {
+        "cache_retrieval_hits": stats["retrieval_hits"],
+        "cache_rerank_hits": stats["rerank_hits"],
+    }
+    try:
+        with open("/tmp/cache.log", "a", encoding="utf-8") as cf:
+            cf.write(json.dumps(cache_metrics) + "\n")
+    except Exception:
+        pass
 
     logger.info(
         "cache_retrieval_hits=%d cache_rerank_hits=%d avg_latency_ms=%.2f",

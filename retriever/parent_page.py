@@ -1,12 +1,14 @@
 import json
 
+
 def load_pages(jsonl_path):
     pages = {}
     with open(jsonl_path, "r", encoding="utf-8") as f:
         for line in f:
             rec = json.loads(line)
-            pages[(rec["doc_id"], rec["page"])] = rec["text"]
-    return pages
+            key = (rec["doc_id"], rec["page"])
+            pages.setdefault(key, []).append(rec.get("text", ""))
+    return {k: "\n".join(v) for k, v in pages.items()}
 
 def expand_to_pages(candidates, pages_store, max_pages=2):
     uniq, seen = [], set()

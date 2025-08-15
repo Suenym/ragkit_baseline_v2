@@ -9,7 +9,13 @@ def build_bm25(pages_jsonl, out_path):
             rec = json.loads(line)
             tokens = rec["text"].lower().split()
             docs.append(tokens)
-            metas.append({"doc_id": rec["doc_id"], "page": rec["page"]})
+            metas.append(
+                {
+                    "doc_id": rec["doc_id"],
+                    "page": rec["page"],
+                    "chunk_id": rec.get("chunk_id", 0),
+                }
+            )
     bm25 = BM25Okapi(docs)
     data = {"metas": metas, "docs": docs}
     with open(out_path, "w", encoding="utf-8") as f:
