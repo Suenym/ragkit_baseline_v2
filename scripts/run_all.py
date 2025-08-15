@@ -41,8 +41,11 @@ def main():
     if args.cmd == "ingest":
         parse_corpus(args.input, args.out)
     elif args.cmd == "index":
-        dense_meta = args.out_dense + ".meta.json" if args.out_dense_meta is None else args.out_dense_meta
-        build_faiss_index(args.pages, args.out_dense, dense_meta)
+        cfg = load_cfg()
+        dense_meta = (
+            args.out_dense + ".meta.json" if args.out_dense_meta is None else args.out_dense_meta
+        )
+        build_faiss_index(args.pages, args.out_dense, dense_meta, cfg)
         build_bm25(args.pages, args.out_bm25)
     elif args.cmd == "answer":
         cfg = load_cfg(args.config)
