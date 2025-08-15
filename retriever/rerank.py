@@ -1,62 +1,41 @@
-"""Offline page re-ranking utilities.
-
-This module implements a deterministic re-ranker that scores candidate pages
-purely with local algorithms (no network calls).  It combines a simple BM25
-lexical score with a fuzzy matching score and normalises the result to the
-[0, 1] range.  Pages are processed in batches to satisfy the exercise
-requirements.
-"""
+"""Offline page re-ranking utilities with optional Cross-Encoder."""
 
 from __future__ import annotations
 
-from typing import List, Dict
+import logging
+import os
+import random
+from typing import Dict, List
 
+import numpy as np
 from rapidfuzz import fuzz
 from rank_bm25 import BM25Okapi
-import os
 
 os.makedirs("/tmp", exist_ok=True)
 with open("/tmp/rerank.log", "w", encoding="utf-8") as _rf:
     _rf.write("OK: rerank deterministic sorted [0,1]\n")
 
 
+# ---------------------------------------------------------------------------
+# Determinism helpers
+np.random.seed(0)
+random.seed(0)
+try:  # pragma: no cover - torch optional
+    import torch
+
+    torch.manual_seed(0)
+except Exception:  # pragma: no cover
+    pass
+
+
 def _tokenize(text: str) -> List[str]:
-    """Very small tokenizer used for BM25.
-
-    The baseline environment does not include heavy NLP libraries, so we fall
-    back to a simple whitespace/lowecase tokenizer which is deterministic and
-    sufficient for the benchmark.
-    """
-
     return text.lower().split()
 
 
-def rerank(query: str, pages: List[Dict], top_m: int = 2, batch_size: int = 4):
-    """Re-rank candidate pages for a given query.
-
-    Parameters
-    ----------
-    query: str
-        User question/query string.
-    pages: list of dicts
-        Each element must contain at least ``{"doc_id", "page", "text"}``.
-    top_m: int
-        Number of top pages to return.
-    batch_size: int
-        Number of pages to process in one batch (>=4 preferred).
-
-    Returns
-    -------
-    list of dicts
-        The top ``top_m`` pages augmented with an ``rr_score`` field in
-        ``[0, 1]``.  Sorting is deterministic and ties are broken by
-        ``(doc_id, page)``.
-    """
-
+def _heuristic_rerank(query: str, pages: List[Dict], top_m: int, batch_size: int) -> List[Dict]:
     if not pages:
         return []
 
-    # --- BM25 lexical score -------------------------------------------------
     tokenized_pages: List[List[str]] = []
     for i in range(0, len(pages), batch_size):
         batch = pages[i : i + batch_size]
@@ -72,11 +51,8 @@ def rerank(query: str, pages: List[Dict], top_m: int = 2, batch_size: int = 4):
     if max_bm25 == min_bm25:
         bm25_norm = [0.0] * len(bm25_scores)
     else:
-        bm25_norm = [
-            (s - min_bm25) / (max_bm25 - min_bm25) for s in bm25_scores
-        ]
+        bm25_norm = [(s - min_bm25) / (max_bm25 - min_bm25) for s in bm25_scores]
 
-    # --- Fuzzy score ---------------------------------------------------------
     fuzzy_scores = [0.0] * len(pages)
     for i in range(0, len(pages), batch_size):
         batch = pages[i : i + batch_size]
@@ -85,9 +61,7 @@ def rerank(query: str, pages: List[Dict], top_m: int = 2, batch_size: int = 4):
                 query.lower(), p["text"].lower()
             ) / 100.0
 
-    # --- Combine and normalise ----------------------------------------------
     combined = [(bm25_norm[i] + fuzzy_scores[i]) / 2.0 for i in range(len(pages))]
-
     max_c = max(combined)
     min_c = min(combined)
     if max_c == min_c:
@@ -95,26 +69,71 @@ def rerank(query: str, pages: List[Dict], top_m: int = 2, batch_size: int = 4):
     else:
         final_scores = [(s - min_c) / (max_c - min_c) for s in combined]
 
-    # Attach scores and sort deterministically
     results = []
     for i, p in enumerate(pages):
         results.append({**p, "rr_score": float(final_scores[i])})
 
     results.sort(key=lambda x: (-x["rr_score"], x["doc_id"], x["page"]))
+    return results[:top_m]
+
+
+def rerank(
+    query: str,
+    pages: List[Dict],
+    top_m: int = 2,
+    batch_size: int = 4,
+    *,
+    mode: str = "auto",
+    ce_model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    ce_max_batch: int = 32,
+) -> List[Dict]:
+    if not pages:
+        return []
+
+    mode_used = "heuristic"
+    results = None
+    if mode in ("auto", "ce"):
+        try:  # pragma: no cover - optional dependency
+            from sentence_transformers import CrossEncoder
+
+            ce = CrossEncoder(ce_model_name, device="cpu")
+            pairs = [(query, p["text"]) for p in pages]
+            scores: List[float] = []
+            for i in range(0, len(pairs), ce_max_batch):
+                bs = ce.predict(pairs[i : i + ce_max_batch], batch_size=ce_max_batch)
+                if isinstance(bs, np.ndarray):
+                    scores.extend(bs.tolist())
+                else:
+                    scores.extend([float(x) for x in bs])
+            hi = max(scores)
+            lo = min(scores)
+            if hi == lo:
+                norm = [0.0] * len(scores)
+            else:
+                norm = [(s - lo) / (hi - lo) for s in scores]
+            results = [{**p, "rr_score": float(n)} for p, n in zip(pages, norm)]
+            results.sort(key=lambda x: (-x["rr_score"], x["doc_id"], x["page"]))
+            mode_used = "ce"
+        except Exception as e:  # pragma: no cover
+            if mode == "ce":
+                logging.error("CrossEncoder unavailable: %s", e)
+            results = None
+
+    if results is None:
+        results = _heuristic_rerank(query, pages, top_m=len(pages), batch_size=batch_size)
+        mode_used = "heuristic"
 
     out = results[:top_m]
     try:
         with open("/tmp/rerank.log", "a", encoding="utf-8") as f:
-            f.write(f"in={len(pages)} out={len(out)} sorted [0,1]\n")
+            f.write(f"mode={mode_used} in={len(pages)} out={len(out)} sorted [0,1]\n")
     except Exception:
         pass
 
     return out
 
 
-# Backwards compatibility for existing orchestrator imports
 llm_like_rerank = rerank
-
 
 __all__ = ["rerank", "llm_like_rerank"]
 

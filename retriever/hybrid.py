@@ -4,6 +4,27 @@ from index.build_dense import search_faiss
 from index.build_bm25 import search_bm25
 import json, os
 
+_HYB_LOG_INIT = False
+
+
+def _log_meta_once(path):
+    global _HYB_LOG_INIT
+    if _HYB_LOG_INIT:
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        embed = obj.get("embedding", {}) if isinstance(obj, dict) else {}
+        os.makedirs("/tmp", exist_ok=True)
+        with open("/tmp/hybrid.log", "w", encoding="utf-8") as lf:
+            lf.write(
+                "dense_meta: method=%s model=%s normalize=%s\n"
+                % (embed.get("method"), embed.get("model"), embed.get("normalize"))
+            )
+        _HYB_LOG_INIT = True
+    except Exception:
+        pass
+
 
 def _normalize(records, score_key):
     """Min-max normalisation of scores in ``records``.
@@ -52,6 +73,7 @@ def hybrid_search(
     the number of final candidates to return (defaults to 24 as per config).
     """
 
+    _log_meta_once(dense_meta)
     dense = search_faiss(dense_index, dense_meta, query, top_k_dense)
     sparse = search_bm25(bm25_index, query, top_k_bm25)
 
