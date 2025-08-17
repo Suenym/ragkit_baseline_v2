@@ -73,7 +73,7 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
 
     # --- Re-rank -----------------------------------------------------------
     query_hash = hashlib.sha1(norm_q[:100].encode("utf-8")).hexdigest()
-    reranked = None
+    reranked_all = None
     if cfg.get("enable_caching", True):
         keys = [(query_hash, p["doc_id"], p["page"]) for p in ctx_pages]
         if all(k in rerank_cache for k in keys):
@@ -82,7 +82,7 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                 {**p, "rr_score": rerank_cache[k]} for p, k in zip(ctx_pages, keys)
             ]
             cached.sort(key=lambda x: (-x["rr_score"], x["doc_id"], x["page"]))
-            reranked = cached[: cfg.get("rerank_out", cfg["answer_max_pages"])]
+            reranked_all = cached
         else:
             stats["rerank_misses"] += 1
             reranked_all = llm_like_rerank(
@@ -100,19 +100,20 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                 max_size = cfg.get("rerank_cache_size", 1024)
                 if len(rerank_cache) > max_size:
                     rerank_cache.popitem(last=False)
-            reranked = reranked_all[: cfg.get("rerank_out", cfg["answer_max_pages"])]
     else:
-        reranked = llm_like_rerank(
+        reranked_all = llm_like_rerank(
             qtext,
             ctx_pages,
-            top_m=cfg.get("rerank_out", cfg["answer_max_pages"]),
+            top_m=len(ctx_pages),
             batch_size=cfg.get("rerank_batch_size", 4),
             mode=cfg.get("rerank_mode", "auto"),
             ce_model_name=cfg.get("ce_model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
             ce_max_batch=cfg.get("ce_max_batch", 32),
         )
 
-    ans = generate_answer(q, reranked, atype)
+    # --- Первая попытка: первая страница ---------------------------------
+    first_ctx = reranked_all[:1]
+    ans = generate_answer(q, first_ctx, atype, cfg)
     try:
         ans = as_json_obj(ans)
     except Exception:
@@ -120,21 +121,13 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
             "question_id": q["question_id"],
             "answer": "N/A",
             "sources": [
-                {"document": reranked[0]["doc_id"], "page": reranked[0]["page"]}
+                {"document": first_ctx[0]["doc_id"], "page": first_ctx[0]["page"]}
             ],
         }
     ok = check_sources(ans, pages_store)
-    if not ok and len(ctx_pages) > cfg.get("rerank_out", cfg["answer_max_pages"]):
-        reranked = llm_like_rerank(
-            qtext,
-            ctx_pages,
-            top_m=min(len(ctx_pages), cfg.get("rerank_out", cfg["answer_max_pages"]) + 1),
-            batch_size=cfg.get("rerank_batch_size", 4),
-            mode=cfg.get("rerank_mode", "auto"),
-            ce_model_name=cfg.get("ce_model_name", "cross-encoder/ms-marco-MiniLM-L-6-v2"),
-            ce_max_batch=cfg.get("ce_max_batch", 32),
-        )
-        ans = generate_answer(q, reranked, atype)
+    if not ok and len(reranked_all) > 1:
+        second_ctx = reranked_all[:2]
+        ans = generate_answer(q, second_ctx, atype, cfg)
         try:
             ans = as_json_obj(ans)
         except Exception:
@@ -142,16 +135,15 @@ def answer_one(q, pages_path, faiss_index, faiss_meta, bm25_index, cfg, stats):
                 "question_id": q["question_id"],
                 "answer": "N/A",
                 "sources": [
-                    {"document": reranked[0]["doc_id"], "page": reranked[0]["page"]}
+                    {"document": second_ctx[0]["doc_id"], "page": second_ctx[0]["page"]}
                 ],
             }
-        # Вторичная проверка источников: если не подтвердили, отдаём N/A
         if not check_sources(ans, pages_store):
             ans = {
                 "question_id": q["question_id"],
                 "answer": "N/A",
                 "sources": [
-                    {"document": reranked[0]["doc_id"], "page": reranked[0]["page"]}
+                    {"document": second_ctx[0]["doc_id"], "page": second_ctx[0]["page"]}
                 ],
             }
 
