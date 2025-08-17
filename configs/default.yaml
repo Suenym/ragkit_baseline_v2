@@ -26,3 +26,15 @@ dense_normalize: true              # L2-нормировка эмбеддинг�
 rerank_mode: auto                  # auto|ce|heuristic
 ce_model_name: cross-encoder/ms-marco-MiniLM-L-6-v2
 ce_max_batch: 32
+
+# LLM provider
+llm_provider: gemini            # gemini|openai|ollama|none
+llm_model: gemini-1.5-flash
+llm_temperature: 0.0
+llm_max_output_tokens: 512
+llm_timeout_s: 60
+llm_lang_order: ["ru","en","kz"]
+
+# Gemini
+gemini_api_key_env: "GEMINI_API_KEY"
+gemini_safety_off: true

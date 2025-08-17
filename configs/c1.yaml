@@ -20,3 +20,15 @@ enable_metrics_logging: true
 orchestrator_concurrency: 1
 enable_caching: true
 enable_metrics_logging: true
+
+# LLM provider
+llm_provider: gemini
+llm_model: gemini-1.5-flash
+llm_temperature: 0.0
+llm_max_output_tokens: 512
+llm_timeout_s: 60
+llm_lang_order: ["ru","en","kz"]
+
+# Gemini
+gemini_api_key_env: "GEMINI_API_KEY"
+gemini_safety_off: true
